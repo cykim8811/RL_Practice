@@ -6,12 +6,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optimizer
+import torch.multiprocessing as mp
 
-def ensure_shared_grads(model, shared_model):
-    for param, shared_param in zip(model.parameters(), shared_model.parameters()):
-        if shared_param.grad is not None:
-            return
-        shared_param._grad = param.grad
+from shared_adam import SharedAdam
+
+def send_grad(model_from, model_to):
+    isCuda = next(model_to.parameters()).is_cuda
+    for param_from, param_to in zip(model_from.parameters(), model_to.parameters()):
+        param_to._grad = param_from.grad.cuda() if isCuda else param_from.grad.cpu()
 
 class Model(nn.Module):
     def __init__(self, action_count):
@@ -19,12 +21,10 @@ class Model(nn.Module):
         self.linear = nn.Sequential(
             nn.Linear(4, 128),
             nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU()
         )
         self.actor = nn.Sequential(
             nn.Linear(128, action_count),
-            nn.LogSoftmax()
+            nn.LogSoftmax(dim=0)
         )
         self.critic = nn.Sequential(
             nn.Linear(128, 1)
@@ -43,19 +43,22 @@ class Environment:
         self.score_log = [0]
         
 
-global_model = Model(2).cuda()
+global_model = Model(2)
+global_model.share_memory()
 
-opt = optimizer.Adam(global_model.parameters(), lr=0.0013, weight_decay=1e-5)
+opt = SharedAdam(global_model.parameters(), lr=0.002, weight_decay=1e-6)
+opt.share_memory()
+
+params = {
+    'gamma': 0.99,
+    'max_timesteps': 20
+}
 
 
-gamma = 0.99
-max_timesteps = 20
-
-environments = [Environment() for _ in range(8)]
-
-
-while True:
-    for E in environments:
+def train(E, global_model, opt, params, verbose):
+    gamma = params['gamma']
+    max_timesteps = params['max_timesteps']
+    while True:
         a, c = E.model(torch.tensor(E.obs).cuda())
         log_prob = a
         action = torch.exp(log_prob).multinomial(1).detach().item()
@@ -67,7 +70,7 @@ while True:
         # Score logging
         E.score_log[-1] += 1
         if done:
-            print(E.score_log[-1])
+            if verbose: print(E.score_log[-1])
             E.score_log.append(0)
 
 
@@ -82,17 +85,33 @@ while True:
                 td_target = torch.tensor(reward).cuda() + gamma * td_target
                 td_error = td_target - c0.detach()[0]
 
-                value_loss = F.mse_loss(c0, td_target)
+                value_loss = F.mse_loss(c0[0], td_target)
                 policy_loss = -log_prob[action] * td_error + 0.01 * torch.sum(log_prob * torch.exp(log_prob))
 
                 total_loss = value_loss + policy_loss
                 sum_loss += total_loss
             
-            ensure_shared_grads(E.model, global_model)
-            
-            opt.zero_grad()
+            E.model.zero_grad()
             sum_loss.backward()
+            send_grad(E.model, global_model)
             opt.step()
             
             E.log = []
             E.model.load_state_dict(global_model.state_dict())
+
+
+
+import time
+
+if __name__ == '__main__':
+    processes = []
+
+    mp.set_start_method('spawn')
+    for i in range(8):
+        p = mp.Process(target=train, args=(Environment(), global_model, opt, params, i==0))
+        p.start()
+        processes.append(p)
+        time.sleep(0.1)
+    for p in processes:
+        time.sleep(0.1)
+        p.join()
