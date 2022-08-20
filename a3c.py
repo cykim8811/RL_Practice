@@ -8,6 +8,9 @@ import torch.nn.functional as F
 import torch.optim as optimizer
 import torch.multiprocessing as mp
 
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter()
+
 from shared_adam import SharedAdam
 
 def send_grad(model_from, model_to):
@@ -20,6 +23,8 @@ class Model(nn.Module):
         super().__init__()
         self.linear = nn.Sequential(
             nn.Linear(4, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
             nn.ReLU(),
         )
         self.actor = nn.Sequential(
@@ -46,7 +51,7 @@ class Environment:
 global_model = Model(2)
 global_model.share_memory()
 
-opt = SharedAdam(global_model.parameters(), lr=0.002, weight_decay=1e-6)
+opt = SharedAdam(global_model.parameters(), lr=0.0002, weight_decay=1e-6)
 opt.share_memory()
 
 params = {
@@ -55,7 +60,7 @@ params = {
 }
 
 
-def train(E, global_model, opt, params, verbose):
+def train(E, global_model, opt, params, process_num):
     gamma = params['gamma']
     max_timesteps = params['max_timesteps']
     while True:
@@ -70,7 +75,9 @@ def train(E, global_model, opt, params, verbose):
         # Score logging
         E.score_log[-1] += 1
         if done:
-            if verbose: print(E.score_log[-1])
+            if process_num == 0:
+                print(E.score_log[-1])
+                writer.add_scalar(f'score(process=1, lr=0.0002)', E.score_log[-1], len(E.score_log))
             E.score_log.append(0)
 
 
@@ -108,7 +115,7 @@ if __name__ == '__main__':
 
     mp.set_start_method('spawn')
     for i in range(8):
-        p = mp.Process(target=train, args=(Environment(), global_model, opt, params, i==0))
+        p = mp.Process(target=train, args=(Environment(), global_model, opt, params, i))
         p.start()
         processes.append(p)
         time.sleep(0.1)
