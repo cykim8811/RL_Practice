@@ -22,9 +22,7 @@ class Model(nn.Module):
     def __init__(self, action_count):
         super().__init__()
         self.linear = nn.Sequential(
-            nn.Linear(4, 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
+            nn.Linear(2, 128),
             nn.ReLU(),
         )
         self.actor = nn.Sequential(
@@ -44,6 +42,7 @@ class Environment:
         self.env = gym.make('CartPole-v1')
         self.model = Model(2).cuda()
         self.obs = self.env.reset()
+        self.obs = [self.obs[0], self.obs[2]]
         self.log = []
         self.score_log = [0]
         
@@ -68,9 +67,12 @@ def train(E, global_model, opt, params, process_num):
         log_prob = a
         action = torch.exp(log_prob).multinomial(1).detach().item()
         s1, reward, done, info = E.env.step(action)
+        s1 = [s1[0], s1[2]]
         E.log.append((E.obs, action, reward, s1, log_prob, c))
         E.obs = s1
-        if done: E.obs = E.env.reset()
+        if done:
+            E.obs = E.env.reset()
+            E.obs = [E.obs[0], E.obs[2]]
         
         # Score logging
         E.score_log[-1] += 1
