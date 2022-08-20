@@ -13,6 +13,8 @@ class Model(nn.Module):
         super().__init__()
         self.linear = nn.Sequential(
             nn.Linear(4, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
             nn.ReLU()
         )
         self.actor = nn.Sequential(
