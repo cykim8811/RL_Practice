@@ -9,7 +9,13 @@ import torch.optim as optimizer
 import torch.multiprocessing as mp
 
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter()
+
+lr = 0.0001
+hidden_dim = 128
+rnn_layers = 2
+process_count = 4
+log_name = f'CartPole[0, 2]_lr:{lr}_hiddendim:{hidden_dim}_rnnlayers:{rnn_layers}_process:{process_count}'
+writer = SummaryWriter(log_dir='runs/' + log_name)
 
 from shared_adam import SharedAdam
 
@@ -22,20 +28,29 @@ class Model(nn.Module):
     def __init__(self, action_count):
         super().__init__()
         self.linear = nn.Sequential(
-            nn.Linear(2, 128),
+            nn.Linear(2, hidden_dim),
             nn.ReLU(),
         )
+        self.rnn = nn.RNN(hidden_dim, hidden_dim, rnn_layers)
+        self.linear2 = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
+        )
         self.actor = nn.Sequential(
-            nn.Linear(128, action_count),
+            nn.Linear(hidden_dim, action_count),
             nn.LogSoftmax(dim=0)
         )
         self.critic = nn.Sequential(
-            nn.Linear(128, 1)
+            nn.Linear(hidden_dim, 1)
         )
     
-    def forward(self, x):
+    def forward(self, x, h):
         x = self.linear(x)
-        return self.actor(x), self.critic(x)
+        x = x.view(1, *x.shape)
+        x, h = self.rnn(x, h)
+        x = x[0]
+        x = self.linear2(x)
+        return self.actor(x), self.critic(x), h
 
 class Environment:
     def __init__(self):
@@ -45,12 +60,13 @@ class Environment:
         self.obs = [self.obs[0], self.obs[2]]
         self.log = []
         self.score_log = [0]
+        self.h = torch.zeros(rnn_layers, hidden_dim).cuda()
         
 
 global_model = Model(2)
 global_model.share_memory()
 
-opt = SharedAdam(global_model.parameters(), lr=0.0002, weight_decay=1e-6)
+opt = SharedAdam(global_model.parameters(), lr=lr, weight_decay=1e-6)
 opt.share_memory()
 
 params = {
@@ -63,7 +79,7 @@ def train(E, global_model, opt, params, process_num):
     gamma = params['gamma']
     max_timesteps = params['max_timesteps']
     while True:
-        a, c = E.model(torch.tensor(E.obs).cuda())
+        a, c, E.h = E.model(torch.tensor(E.obs).cuda(), E.h)
         log_prob = a
         action = torch.exp(log_prob).multinomial(1).detach().item()
         s1, reward, done, info = E.env.step(action)
@@ -79,13 +95,13 @@ def train(E, global_model, opt, params, process_num):
         if done:
             if process_num == 0:
                 print(E.score_log[-1])
-                writer.add_scalar(f'score(process=1, lr=0.0002)', E.score_log[-1], len(E.score_log))
+                writer.add_scalar(f'score', E.score_log[-1], len(E.score_log))
             E.score_log.append(0)
 
 
         if done or len(E.log) >= max_timesteps:
             sum_loss = torch.tensor(0.0).cuda()
-            td_target = E.model(torch.tensor(s1).cuda())[1] if not done else torch.tensor(0.0).cuda()
+            td_target = E.model(torch.tensor(s1).cuda(), E.h)[1] if not done else torch.tensor(0.0).cuda()
             for i, data in enumerate(reversed(E.log)):
                 s0, action, reward, s1, log_prob, c0 = data
 
@@ -107,7 +123,8 @@ def train(E, global_model, opt, params, process_num):
             
             E.log = []
             E.model.load_state_dict(global_model.state_dict())
-
+            
+            E.h = torch.zeros_like(E.h)
 
 
 import time
@@ -116,7 +133,7 @@ if __name__ == '__main__':
     processes = []
 
     mp.set_start_method('spawn')
-    for i in range(8):
+    for i in range(process_count):
         p = mp.Process(target=train, args=(Environment(), global_model, opt, params, i))
         p.start()
         processes.append(p)
